@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Playground Price Action</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #131722; color: #d1d4dc; display: flex; margin: 0; height: 100vh; }
+        #chart-container { flex: 1; height: 100%; position: relative; }
+        #sidebar { width: 320px; background: #1e222d; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 15px; border-left: 1px solid #2a2e39; }
+        input, select, textarea { width: 100%; padding: 8px; margin-top: 5px; background: #2a2e39; border: 1px solid #363c4e; color: white; border-radius: 4px; box-sizing: border-box;}
+        button { padding: 10px; background: #2962ff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #1e53e5; }
+        .result-box { margin-top: 20px; padding: 15px; border-radius: 4px; background: #2a2e39; display: none;}
+    </style>
+</head>
+<body>
+
+    <div id="chart-container"></div>
+    
+    <div id="sidebar">
+        <h2>Simulador</h2>
+        
+        <div>
+            <label>Ticker (Ej: AMD, AAPL):</label>
+            <input type="text" id="ticker" value="AMD">
+        </div>
+        <div>
+            <label>Temporalidad:</label>
+            <select id="timeframe">
+                <option value="1wk">Semanal (1wk)</option>
+                <option value="1d" selected>Diaria (1d)</option>
+            </select>
+        </div>
+        <button onclick="loadRandomChart()">Generar Gráfico Aleatorio</button>
+        <button style="background: #ff9800; margin-top: 5px;" onclick="nextCandle()">Siguiente Vela ( ➜ )</button>
+
+        <hr style="border-color:#363c4e; width: 100%;">
+
+        <div>
+            <label>Precio Actual (Entrada):</label>
+            <input type="text" id="entryPrice" readonly style="background: #131722; cursor: not-allowed;">
+        </div>
+        <div>
+            <label>Stop Loss (SL):</label>
+            <input type="number" step="0.01" id="sl">
+        </div>
+        <div>
+            <label>Take Profit (TP):</label>
+            <input type="number" step="0.01" id="tp">
+        </div>
+        <div>
+            <label>¿Por qué tomas esta decisión? (Rationale):</label>
+            <textarea id="rationale" rows="4" placeholder="Ej: Falso rompimiento del soporte previo con volumen decreciente..."></textarea>
+        </div>
+        
+        <button style="background: #00bcd4;" onclick="executeTrade()">Ejecutar y Ver Futuro</button>
+
+        <div class="result-box" id="resultBox">
+            <h3 style="margin:0 0 10px 0;">Resultado:</h3>
+            <p id="resultText" style="margin:0; font-weight:bold;"></p>
+        </div>
+
+        <button style="background: #4caf50; margin-top: auto;" onclick="exportLog()">Exportar Sesión (JSON)</button>
+    </div>
+
+    <script>
+        let chart, candleSeries, volumeSeries;
+        let tpBox = null, slBox = null;
+
+        async function nextCandle() {
+            // Si ya hay un resultado en pantalla, bloqueamos el avance para no hacer trampas
+            if (document.getElementById('resultBox').style.display === 'block') {
+                return; 
+            }
+
+            const res = await fetch('/api/next_candle', { method: 'POST' });
+            const data = await res.json();
+            
+            if(data.error) { 
+                alert(data.error); 
+                return; 
+            }
+
+            const c = data.candle;
+            
+            // Inyectamos la nueva vela y el volumen en el gráfico en tiempo real
+            candleSeries.update({time: c.time, open: c.open, high: c.high, low: c.low, close: c.close});
+            volumeSeries.update({time: c.time, value: c.value, color: c.close > c.open ? '#26a69a88' : '#ef535088'});
+            
+            // Actualizamos el precio de entrada en la interfaz
+            document.getElementById('entryPrice').value = data.entry_price.toFixed(2);
+        }
+
+        // Atajo de teclado: Avanzar vela con la Flecha Derecha
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'ArrowRight') {
+                // Evitamos que salte la vela si estás escribiendo tu justificación en los inputs
+                if (document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+                    nextCandle();
+                }
+            }
+        });
+
+        function initChart() {
+            const container = document.getElementById('chart-container');
+            chart = LightweightCharts.createChart(container, {
+                layout: { background: { type: 'solid', color: '#131722' }, textColor: '#d1d4dc', },
+                grid: { vertLines: { color: '#363c4e' }, horzLines: { color: '#363c4e' }, },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal, },
+                rightPriceScale: { borderColor: '#363c4e', },
+                timeScale: { borderColor: '#363c4e', },
+            });
+
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+                wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+            });
+
+            // 👇 Reservar espacio inferior para que las velas no bajen hasta el volumen
+            chart.priceScale('right').applyOptions({
+                scaleMargins: { top: 0.05, bottom: 0.25 }
+            });
+
+            volumeSeries = chart.addHistogramSeries({
+                priceFormat: { type: 'volume' },
+                priceScaleId: 'vol',  // 👈 ID propio, no string vacío
+            });
+
+            // 👇 El volumen ocupa el 25% inferior del chart
+            chart.priceScale('vol').applyOptions({
+                scaleMargins: { top: 0.75, bottom: 0 }
+            });
+        }
+
+        async function loadRandomChart() {
+            document.getElementById('resultBox').style.display = 'none';
+            if (tpBox) { chart.removeSeries(tpBox); tpBox = null; }
+            if (slBox) { chart.removeSeries(slBox); slBox = null; }
+            const ticker = document.getElementById('ticker').value;
+            const timeframe = document.getElementById('timeframe').value;
+
+            const res = await fetch('/api/load_chart', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ticker, timeframe})
+            });
+            const data = await res.json();
+            if(data.error) { alert(data.error); return; }
+
+            // Separar datos de velas y volumen
+            const candles = data.chart_data.map(d => ({time: d.time, open: d.open, high: d.high, low: d.low, close: d.close}));
+            const volumes = data.chart_data.map(d => ({time: d.time, value: d.value, color: d.close > d.open ? '#26a69a88' : '#ef535088'}));
+
+            candleSeries.setData(candles);
+            volumeSeries.setData(volumes);
+            document.getElementById('entryPrice').value = data.entry_price.toFixed(2);
+        }
+
+        async function executeTrade() {
+            const sl = document.getElementById('sl').value;
+            const tp = document.getElementById('tp').value;
+            const rationale = document.getElementById('rationale').value;
+
+            if(!sl || !tp) { alert("Pon un SL y un TP"); return; }
+
+            const res = await fetch('/api/evaluate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({sl, tp, rationale})
+            });
+            const data = await res.json();
+
+            // Pintar el futuro en el gráfico
+            const candles = data.future_data.map(d => ({time: d.time, open: d.open, high: d.high, low: d.low, close: d.close}));
+            const volumes = data.future_data.map(d => ({time: d.time, value: d.value, color: d.close > d.open ? '#26a69a88' : '#ef535088'}));
+            
+            // Añadir el futuro progresivamente al gráfico existente (simulando que pasa el tiempo)
+            candles.forEach(c => candleSeries.update(c));
+            volumes.forEach(v => volumeSeries.update(v));
+
+            // --- NUEVO: DIBUJAR CAJAS DE RIESGO / BENEFICIO ---
+            const entryVal = data.log_entry.entry_price;
+            const entryDate = data.log_entry.entry_date;
+            const slVal = parseFloat(sl);
+            const tpVal = parseFloat(tp);
+
+            // 1. Creamos el recorrido de tiempo de la caja (desde el día de entrada hasta el día de salida)
+            const boxDataTP = [{ time: entryDate, value: tpVal }];
+            const boxDataSL = [{ time: entryDate, value: slVal }];
+            
+            data.future_data.forEach(c => {
+                boxDataTP.push({ time: c.time, value: tpVal });
+                boxDataSL.push({ time: c.time, value: slVal });
+            });
+
+            // 2. Dibujamos la caja verde (Take Profit)
+            tpBox = chart.addBaselineSeries({
+                baseValue: { type: 'price', price: entryVal },
+                topLineColor: 'rgba(38, 166, 154, 1)',
+                topFillColor1: 'rgba(38, 166, 154, 0.2)', // Verde transparente
+                topFillColor2: 'rgba(38, 166, 154, 0.2)',
+                bottomLineColor: 'rgba(38, 166, 154, 1)',
+                bottomFillColor1: 'rgba(38, 166, 154, 0.2)',
+                bottomFillColor2: 'rgba(38, 166, 154, 0.2)',
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+            });
+
+            // 3. Dibujamos la caja roja (Stop Loss)
+            slBox = chart.addBaselineSeries({
+                baseValue: { type: 'price', price: entryVal },
+                topLineColor: 'rgba(239, 83, 80, 1)',
+                topFillColor1: 'rgba(239, 83, 80, 0.2)', // Rojo transparente
+                topFillColor2: 'rgba(239, 83, 80, 0.2)',
+                bottomLineColor: 'rgba(239, 83, 80, 1)',
+                bottomFillColor1: 'rgba(239, 83, 80, 0.2)',
+                bottomFillColor2: 'rgba(239, 83, 80, 0.2)',
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+            });
+
+            // 4. Inyectamos los datos para que se pinte en pantalla
+            tpBox.setData(boxDataTP);
+            slBox.setData(boxDataSL);
+            // --- FIN DE LAS CAJAS ---
+
+            // Mostrar resultado
+            const rBox = document.getElementById('resultBox');
+            rBox.style.display = 'block';
+            const text = document.getElementById('resultText');
+            text.innerText = data.log_entry.result;
+            text.style.color = data.log_entry.result.includes("Ganancia") ? '#26a69a' : '#ef5350';
+        }
+
+        async function exportLog() {
+            const res = await fetch('/api/export');
+            const data = await res.json();
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+            const dlAnchorElem = document.createElement('a');
+            dlAnchorElem.setAttribute("href", dataStr);
+            dlAnchorElem.setAttribute("download", "registro_sesion_bolsa.json");
+            dlAnchorElem.click();
+        }
+
+        initChart();
+    </script>
+</body>
+</html>
